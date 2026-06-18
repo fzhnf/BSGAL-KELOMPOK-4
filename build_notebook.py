@@ -2243,6 +2243,10 @@ def _build_notebook():
         with open(os.path.join(cfg.BASELINE_CKPT_DIR, "baseline_training_log.json"), "w") as f:
             json.dump(train_log, f, indent=2)
         print(f"[Baseline] DONE in {elapsed/60:.1f} min → {final_path}")
+        print(f"[Baseline] Final loss (EMA): {logger.avg('loss_total'):.4f}")
+        if logger.avg('loss_total') > 10.0:
+            print("[Baseline] ⚠ Loss seems high — training may not have converged.")
+            print("[Baseline]   Try increasing BASELINE_EPOCHS or TRAIN_SUBSET_SIZE.")
         return final_path
 
 
