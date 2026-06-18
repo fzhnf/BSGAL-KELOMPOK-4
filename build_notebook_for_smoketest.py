@@ -774,8 +774,12 @@ def _build_notebook():
         try: from lvis import LVIS, LVISResults, LVISEval
         except ImportError: print("[WARN] lvis not installed"); return {}
         preds = predictions_to_lvis_results(model, eval_loader, device)
-        if not preds: return {k: 0.0 for k in ["AP", "AP50", "AP75", "APr", "APc", "APf"]}
+        print(f"[Eval] {len(preds)} predictions from {len(eval_loader)} images")
+        if not preds:
+            print("[Eval] ⚠ ZERO predictions — check model/device/data")
+            return {k: 0.0 for k in ["AP", "AP50", "AP75", "APr", "APc", "APf"]}
         lvis_gt = LVIS(ann_json)
+        print(f"[Eval] GT: {len(lvis_gt.get_img_ids())} imgs, {len(lvis_gt.get_ann_ids())} anns")
         lvis_dt = LVISResults(lvis_gt, preds)
         ev = LVISEval(lvis_gt, lvis_dt, iou_type="segm")
         ev.run()

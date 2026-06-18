@@ -1919,9 +1919,16 @@ def _build_notebook():
             print("[WARN] lvis-api not installed")
             return {}
         preds = predictions_to_lvis_results(model, eval_loader, device)
+        n_images = len(eval_loader)
+        print(f"[Eval] {len(preds)} predictions from {n_images} images "
+              f"(ann: {ann_json})")
         if not preds:
+            print("[Eval] ⚠ ZERO predictions — model produced no detections.")
+            print("[Eval]   Possible causes: model not loaded, GPU OOM, all scores below threshold.")
             return {k: 0.0 for k in ["AP", "AP50", "AP75", "APr", "APc", "APf"]}
         lvis_gt = LVIS(ann_json)
+        print(f"[Eval] GT: {len(lvis_gt.get_img_ids())} images, "
+              f"{len(lvis_gt.get_ann_ids())} annotations")
         lvis_dt = LVISResults(lvis_gt, preds)
         eval_inst = LVISEval(lvis_gt, lvis_dt, iou_type="segm")
         eval_inst.run()
