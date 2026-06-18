@@ -857,6 +857,32 @@ def _build_notebook():
     print(f"[Setup] iters_per_epoch: {iters_per_epoch}")
 
 
+    # ── Pre-training sanity eval ──────────────────────────────────────────────
+    # Evaluate the ImageNet-pretrained model BEFORE any LVIS training.
+    # If this produces AP > 0, the eval pipeline is correct.
+    print("\n[Sanity] Pre-training eval (ImageNet weights, no LVIS training) ...")
+    pretrained_model = build_model(
+        num_classes_with_bg=cfg.NUM_CLASSES + 1,
+        freq_weight=cat_info["cat_freq_weight"],
+        fed_loss_num_cat=cfg.FED_LOSS_NUM_CAT,
+        use_fed_loss=cfg.USE_FED_LOSS,
+        image_size=cfg.IMAGE_SIZE,
+    ).to(DEVICE)
+    metrics_pre = evaluate_on_lvis(pretrained_model, eval_loader, VAL_ANN_SUBSET, DEVICE)
+    del pretrained_model; torch.cuda.empty_cache()
+
+    n_preds_pre = sum(1 for _ in predictions_to_lvis_results(pretrained_model, eval_loader, DEVICE)
+                      if False)  # won't run; just checking function exists
+    print(f"[Sanity] Pre-training metrics: AP={metrics_pre.get('AP', 0):.4f}  "
+          f"AP50={metrics_pre.get('AP50', 0):.4f}")
+    if metrics_pre.get("AP", 0) > 0:
+        print("[Sanity] ✅ Eval pipeline confirmed working (pre-training AP > 0)")
+    else:
+        print("[Sanity] ⚠ Pre-training AP = 0 (expected for untrained on 1203 classes)")
+        print("[Sanity]   Training should fix this. If post-training AP is also 0,")
+        print("[Sanity]   check that the val subset annotation JSON matches the eval subset.")
+
+
     # ── Baseline Training ─────────────────────────────────────────────────────
     final_ckpt = os.path.join(cfg.CKPT_DIR, "smoketest_final.pth")
     total_iters = cfg.BASELINE_EPOCHS * iters_per_epoch
@@ -896,7 +922,7 @@ def _build_notebook():
     torch.save({"model": model.state_dict(), "step": total_iters}, final_ckpt)
     print(f"[Train] DONE in {elapsed/60:.1f} min → {final_ckpt}")
 
-    # ── Evaluation ────────────────────────────────────────────────────────────
+    # ── Post-training Evaluation ──────────────────────────────────────────────
     del model; torch.cuda.empty_cache()
 
     eval_model = build_model(
@@ -914,12 +940,17 @@ def _build_notebook():
     del eval_model; torch.cuda.empty_cache()
 
     # ── Results ───────────────────────────────────────────────────────────────
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 60)
     print("  SMOKETEST RESULTS")
-    print("=" * 50)
+    print("=" * 60)
+    print(f"  {'Metric':<8} {'Pre-train':>10} {'Post-train':>10} {'Δ':>8}")
+    print("  " + "-" * 38)
     for k in ["AP", "AP50", "AP75", "APr", "APc", "APf"]:
-        print(f"  {k:<8} = {metrics.get(k, 0.0):.4f}")
-    print("=" * 50)
+        pre = metrics_pre.get(k, 0.0)
+        post = metrics.get(k, 0.0)
+        delta = post - pre
+        print(f"  {k:<8} {pre:>10.4f} {post:>10.4f} {delta:>+8.4f}")
+    print("=" * 60)
 
     ap = metrics.get("AP", 0.0)
     if ap > 0:
@@ -928,11 +959,15 @@ def _build_notebook():
         print("   Use bsgal.ipynb for full training with BSGAL + CB.")
     else:
         print(f"\n❌ SMOKETEST FAILED: AP = {ap:.4f}")
-        print("   Check dataset paths and annotation JSON.")
+        print("   Possible causes:")
+        print("   1. val subset annotation JSON doesn't match eval subset")
+        print("   2. Dataset images missing from disk")
+        print("   3. Model not producing any detections (check GPU)")
 
     # Print METRIC lines for automated parsing
     for k, v in metrics.items():
         print(f"METRIC {k}={v}")
+    print(f"METRIC ap_improvement={metrics.get('AP', 0) - metrics_pre.get('AP', 0):.4f}")
     ''')
     )
 
