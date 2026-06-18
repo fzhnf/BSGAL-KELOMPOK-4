@@ -175,8 +175,8 @@ def _build_notebook():
         BASE_DIR: str = field(default_factory=_discover_base_dir)
 
         # ── Smoketest schedule ───────────────────────────────────────────────
-        BASELINE_EPOCHS: int = 2          # Just enough to learn something
-        TRAIN_SUBSET_SIZE: Optional[int] = 500
+        BASELINE_EPOCHS: int = 3          # 3 epochs for convergence with 1203 classes
+        TRAIN_SUBSET_SIZE: Optional[int] = 1000  # 1000 imgs for head+tail class coverage
         VAL_SUBSET_SIZE: Optional[int] = 200
         IMS_PER_BATCH: int = 4
         IMAGE_SIZE: int = 640
