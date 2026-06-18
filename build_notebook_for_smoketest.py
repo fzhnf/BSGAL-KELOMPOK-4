@@ -740,6 +740,8 @@ def _build_notebook():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
             optimizer.step()
+        if not math.isfinite(loss.item()):
+            print(f"[WARN] NaN/Inf loss ({loss.item():.4f}). Try: USE_AMP=False or lower LR.")
         return {k: v.item() for k, v in loss_dict.items()} | {"loss_total": loss.item()}
 
 

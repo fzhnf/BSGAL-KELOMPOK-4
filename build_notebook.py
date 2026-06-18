@@ -1714,6 +1714,10 @@ def _build_notebook():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
             optimizer.step()
+        # NaN guard: if loss is NaN, the model weights are garbage.
+        if not math.isfinite(loss.item()):
+            print(f"[WARN] NaN/Inf loss detected ({loss.item():.4f}). "
+                  "Try: set USE_AMP=False, or lower LR.")
         return {k: v.item() for k, v in loss_dict.items()} | {"loss_total": loss.item()}
 
 
