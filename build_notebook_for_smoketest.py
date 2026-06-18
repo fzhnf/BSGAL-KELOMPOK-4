@@ -871,8 +871,6 @@ def _build_notebook():
     metrics_pre = evaluate_on_lvis(pretrained_model, eval_loader, VAL_ANN_SUBSET, DEVICE)
     del pretrained_model; torch.cuda.empty_cache()
 
-    n_preds_pre = sum(1 for _ in predictions_to_lvis_results(pretrained_model, eval_loader, DEVICE)
-                      if False)  # won't run; just checking function exists
     print(f"[Sanity] Pre-training metrics: AP={metrics_pre.get('AP', 0):.4f}  "
           f"AP50={metrics_pre.get('AP50', 0):.4f}")
     if metrics_pre.get("AP", 0) > 0:
