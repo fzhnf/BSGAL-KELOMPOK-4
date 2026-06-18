@@ -48,7 +48,7 @@ def _build_notebook():
     4. **Class-aware BSGAL** - rarity-weighted per-class gradient similarity
 
     All improvements can be individually toggled via ``Config`` flags.
-    The code is structured for AMD ROCm GPUs (RX 7600S, 8 GB VRAM) but runs
+    The code targets **NVIDIA RTX 3090 (24 GB VRAM)** on vast.ai but runs
     on any CUDA or CPU PyTorch backend.
     """)
     )
@@ -151,10 +151,13 @@ def _build_notebook():
 
         ensure_colab_dataset_layout(drive_base)
 
-    # ── Local-only ROCm setup (AMD RX 7600S) ──────────────────────────────────
+    # ── GPU setup: CUDA (NVIDIA) or ROCm (AMD) ────────────────────────────────
     if RUNTIME == "local":
-        os.environ.setdefault("ROCR_VISIBLE_DEVICES", "1")
-        os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        # NVIDIA GPU (e.g. RTX 3090 on vast.ai) - no special env vars needed.
+        # For AMD ROCm GPUs, uncomment:
+        #   os.environ.setdefault("ROCR_VISIBLE_DEVICES", "1")
+        #   os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
+        pass
 
     # ── Install dependencies ────────────────────────────────────────────────────
     import subprocess
@@ -166,7 +169,7 @@ def _build_notebook():
 
     # ── Quick PyTorch version check ─────────────────────────────────────────────
     import torch, torchvision
-    torch.backends.cudnn.enabled = False
+    torch.backends.cudnn.enabled = True   # Enable cuDNN for NVIDIA GPUs (was False for ROCm)
     print(f"Python:      {sys.version.split()[0]}")
     print(f"PyTorch:     {torch.__version__}")
     print(f"TorchVision: {torchvision.__version__}")
@@ -263,13 +266,9 @@ def _build_notebook():
         Central configuration - all knobs are here.
         Paths are auto-discovered; set ``BSGAL_BASE_DIR`` as an env-var override.
 
-        ⚠️  Performance note:
-        BSGAL training computes 3-4 gradient passes per iteration.  On a single
-        consumer GPU (RX 7600S / RTX 3060), one BSGAL epoch on 2 000 images
-        takes ~5-8 hours.  **Always start with TINY=True for smoke-testing.**
-        Switch to TINY=False only when you are ready for a long training run.
-        The pipeline end-to-end (baseline + cRT + LWS + 2× BSGAL) on 2 000 images
-        with TINY=False takes ~30+ hours on a single GPU.
+        Target: RTX 3090 (24 GB VRAM) on vast.ai.
+        TINY mode produces non-zero metrics in ~1-2 hours.
+        Full mode (TINY=False) on 5 000 images takes ~6-10 hours on RTX 3090.
         """
         # ── Path Discovery ──────────────────────────────────────────────────────
         @staticmethod
@@ -284,9 +283,11 @@ def _build_notebook():
             candidates = [
                 cwd,
                 cwd.parent,
+                Path("/workspace/BSGAL-KELOMPOK-4"),         # vast.ai default
+                Path("/workspace"),                            # vast.ai alt
                 Path("/content/drive/MyDrive/BSGAL-KELOMPOK-4"),
                 Path("/content/BSGAL-KELOMPOK-4"),
-                Path("/workspace/BSGAL-KELOMPOK-4"),
+                Path("/content/drive/MyDrive/BSGAL"),
                 Path("/home/fzhnf/Public/study-repos/DiverGen/BSGAL-KELOMPOK-4"),
             ]
             for p in candidates:
@@ -298,19 +299,19 @@ def _build_notebook():
 
         BASE_DIR: str = field(default_factory=_discover_base_dir)
 
-        # ── Scale & Schedule ────────────────────────────────────────────────────
-        BASELINE_EPOCHS: int = 4          # Epochs for joint training
+        # ── Scale & Schedule (tuned for RTX 3090, 24 GB VRAM) ────────────────
+        BASELINE_EPOCHS: int = 6          # Epochs for joint training
         BSGAL_EPOCHS: int = 4             # Epochs for BSGAL active-learning phase
         CRT_EPOCHS: int = 5               # [CB] Epochs for classifier re-training
         LWS_EPOCHS: int = 3               # [CB] Epochs for LWS fine-tuning
         BASELINE_ITERS: Optional[int] = None
         BSGAL_ITERS: Optional[int] = None
-        TRAIN_SUBSET_SIZE: Optional[int] = 2000
-        VAL_SUBSET_SIZE: Optional[int] = 200
-        IMS_PER_BATCH: int = 4
+        TRAIN_SUBSET_SIZE: Optional[int] = 5000   # Enough for head+tail coverage
+        VAL_SUBSET_SIZE: Optional[int] = 1000     # Stable eval with diverse categories
+        IMS_PER_BATCH: int = 4                    # 4 fits comfortably in 24 GB at 640px
         ACTIVE_TEST_BATCHSIZE: int = 4
         IMAGE_SIZE: int = 640
-        NUM_WORKERS: int = 0
+        NUM_WORKERS: int = 4                      # Parallel data loading on vast.ai
 
         # ── Logging & Checkpoint ────────────────────────────────────────────────
         LOG_EVERY: int = 50
@@ -413,18 +414,19 @@ def _build_notebook():
     cfg = Config()
 
     # ── Tiny Mode Override ──────────────────────────────────────────────────────
-    # TINY=True  → ~2-4 hour pipeline (500 imgs, 3 epochs); produces non-zero metrics
-    # TINY=False → ~30+ hour pipeline (2 000 imgs, 4 epochs); use for final results
+    # TINY=True  → ~1-2 hour pipeline on RTX 3090; produces non-zero metrics
+    # TINY=False → ~6-10 hour pipeline on RTX 3090; use for final results
     if cfg.TINY:
-        cfg.BASELINE_EPOCHS = 4          # enough iters for RPN + heads to converge
+        cfg.BASELINE_EPOCHS = 6          # enough iters for RPN + heads to converge
         cfg.BSGAL_EPOCHS    = 3          # BSGAL is expensive but needs more iters
         cfg.CRT_EPOCHS      = 4          # classifier re-training benefits from more epochs
         cfg.LWS_EPOCHS      = 3
-        cfg.TRAIN_SUBSET_SIZE = 1000     # key change: 64→1000 (×15 more data)
-        cfg.VAL_SUBSET_SIZE   = 64       # 8→64 for stable eval
-        cfg.IMS_PER_BATCH     = 4        # restore full batch for efficiency
+        cfg.TRAIN_SUBSET_SIZE = 3000     # 3000 imgs for meaningful head+tail coverage
+        cfg.VAL_SUBSET_SIZE   = 500      # 500 imgs for stable eval across categories
+        cfg.IMS_PER_BATCH     = 4        # 4 fits in 24 GB at 640px
         cfg.ACTIVE_TEST_BATCHSIZE = 4
-        cfg.LOG_EVERY = 25               # 5→25 to reduce noise
+        cfg.WARMUP_ITERS = 300           # shorter warmup for subset training
+        cfg.LOG_EVERY = 25               # reduce log noise
         # ── Fast CB flags for TINY (skip expensive stages to get AP fast) ────
         cfg.USE_CRT = True
         cfg.USE_TAU_NORM = True
@@ -1930,7 +1932,8 @@ def _build_notebook():
         return out
 
 
-    def compute_f1_scores(model, eval_loader, device, iou_thresh: float = 0.5
+    def compute_f1_scores(model, eval_loader, device, iou_thresh: float = 0.5,
+                          val_ann_json: str = None,
                           ) -> Dict[str, float]:
         """
         Per-class F1 scores via LVIS API - vital for long-tailed evaluation.
@@ -1939,6 +1942,7 @@ def _build_notebook():
         the macro-average F1 and class-frequency-stratified F1.
         This directly addresses the Week 3 requirement for F1-Score reporting.
         """
+        ann_json = val_ann_json or cfg.VAL_ANN_JSON
         try:
             from lvis import LVIS, LVISResults, LVISEval
         except ImportError:
@@ -1946,7 +1950,7 @@ def _build_notebook():
         preds = predictions_to_lvis_results(model, eval_loader, device)
         if not preds:
             return {"F1_macro": 0.0, "F1_rare": 0.0, "F1_common": 0.0, "F1_freq": 0.0}
-        lvis_gt = LVIS(cfg.VAL_ANN_JSON)
+        lvis_gt = LVIS(ann_json)
         lvis_dt = LVISResults(lvis_gt, preds)
         eval_inst = LVISEval(lvis_gt, lvis_dt, iou_type="segm")
         eval_inst.run()
@@ -2001,8 +2005,10 @@ def _build_notebook():
 
     def evaluate_checkpoint(ckpt_path, eval_loader, label, device,
                             apply_tau_norm=False, tau_p=1.0,
-                            compute_f1: bool = True) -> Dict[str, float]:
+                            compute_f1: bool = True,
+                            val_ann_json: str = None) -> Dict[str, float]:
         """Load checkpoint, optionally apply τ-norm, evaluate (AP + F1)."""
+        ann_json = val_ann_json or cfg.VAL_ANN_JSON
         if not ckpt_path or not os.path.exists(ckpt_path):
             print(f"[{label}] checkpoint not found: {ckpt_path}")
             return {}
@@ -2018,10 +2024,10 @@ def _build_notebook():
         model.load_state_dict(state["model"], strict=False)
         if apply_tau_norm:
             tau_normalize_classifier(model, tau_p)
-        print(f"[{label}] running evaluation ...")
-        metrics = evaluate_on_lvis(model, eval_loader, cfg.VAL_ANN_JSON, device)
+        print(f"[{label}] running evaluation on {ann_json} ...")
+        metrics = evaluate_on_lvis(model, eval_loader, ann_json, device)
         if compute_f1:
-            f1 = compute_f1_scores(model, eval_loader, device)
+            f1 = compute_f1_scores(model, eval_loader, device, val_ann_json=ann_json)
             metrics.update(f1)
         del model
         if device.type == "cuda": torch.cuda.empty_cache()
@@ -2124,6 +2130,28 @@ def _build_notebook():
         require_annotations=False,
     )
 
+    # ── CRITICAL FIX: Create subset annotation JSON for evaluation ────────────
+    # The LVIS evaluator computes AP over ALL images in the annotation file.
+    # If we evaluate a 64-image subset against the full 20K-image val JSON,
+    # images without predictions get zero recall → metrics collapse to 0.
+    # Fix: filter the annotation JSON to match the eval subset exactly.
+    val_image_ids = {r["image_id"] for r in val_records}
+    _val_ann_subset_path = os.path.join(cfg.DATASETS_DIR, "lvis", "lvis_v1_val_subset.json")
+    if not os.path.exists(_val_ann_subset_path):
+        print(f"[Setup] Creating val subset annotation JSON ({len(val_image_ids)} images) ...")
+        with open(cfg.VAL_ANN_JSON) as f:
+            full_val_ann = json.load(f)
+        val_ann_subset = {
+            "images": [img for img in full_val_ann["images"] if img["id"] in val_image_ids],
+            "annotations": [ann for ann in full_val_ann["annotations"] if ann["image_id"] in val_image_ids],
+            "categories": full_val_ann["categories"],
+        }
+        with open(_val_ann_subset_path, "w") as f:
+            json.dump(val_ann_subset, f)
+        print(f"[Setup] Saved subset: {len(val_ann_subset['images'])} imgs, "
+              f"{len(val_ann_subset['annotations'])} anns")
+    VAL_ANN_SUBSET = _val_ann_subset_path
+    print(f"[Setup] Using eval annotations: {VAL_ANN_SUBSET}")
     print("[Setup] computing repeat factors ...")
     repeat_factors = compute_repeat_factors(train_records, cfg.NUM_CLASSES, threshold=0.001)
     sampler_train = RepeatFactorSampler(repeat_factors, seed=cfg.SEED)
@@ -2468,7 +2496,7 @@ def _build_notebook():
                 backbone=cfg.BACKBONE,
             ).to(DEVICE),
             bsgal_ckpt_path if bsgal_ckpt_path else baseline_ckpt_path,
-            eval_loader, cfg.VAL_ANN_JSON,
+            eval_loader, VAL_ANN_SUBSET,
             device=DEVICE,
         )
         tau_p = best_p
@@ -2486,7 +2514,7 @@ def _build_notebook():
         metrics_bsgal_plain = evaluate_checkpoint(bsgal_plain_ckpt, eval_loader,
                                                   "BSGAL-orig", DEVICE,
                                                   apply_tau_norm=use_tau, tau_p=tau_p,
-                                                  compute_f1=True)
+                                                  compute_f1=True, val_ann_json=VAL_ANN_SUBSET)
 
     # BSGAL+CB (full pipeline: cRT → LWS → BSGAL with CB flags)
     metrics_bsgal_cb = {}
@@ -2494,7 +2522,7 @@ def _build_notebook():
         print("Evaluating BSGAL+CB (final pipeline) ...")
         metrics_bsgal_cb = evaluate_checkpoint(bsgal_ckpt_path, eval_loader, "BSGAL+CB",
                                             DEVICE, apply_tau_norm=use_tau, tau_p=tau_p,
-                                            compute_f1=True)
+                                            compute_f1=True, val_ann_json=VAL_ANN_SUBSET)
 
     # ── Results table: AP + F1 metrics ────────────────────────────────────
     ap_keys   = ["AP", "AP50", "AP75", "APs", "APm", "APl", "APr", "APc", "APf"]
