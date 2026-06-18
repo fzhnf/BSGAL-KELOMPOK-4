@@ -849,6 +849,17 @@ def _build_notebook():
             json.dump(val_ann_subset, f)
         print(f"[Setup] Saved: {len(val_ann_subset['images'])} imgs, {len(val_ann_subset['annotations'])} anns")
     VAL_ANN_SUBSET = val_ann_subset_path
+    # ── Validate the subset annotation JSON ────────────────────────────────────
+    with open(VAL_ANN_SUBSET) as f:
+        _val_sub = json.load(f)
+    _n_imgs = len(_val_sub.get("images", []))
+    _n_anns = len(_val_sub.get("annotations", []))
+    print(f"[Setup] Val subset: {_n_imgs} imgs, {_n_anns} anns")
+    if _n_anns == 0:
+        raise RuntimeError(
+            f"[FATAL] Val subset annotation JSON has 0 annotations! File: {VAL_ANN_SUBSET}\n"
+            f"  AP will always be 0. Check that val_records has images with annotations."
+        )
     print(f"[Setup] Eval annotations: {VAL_ANN_SUBSET}")
 
     # ── Build loaders ─────────────────────────────────────────────────────────

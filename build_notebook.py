@@ -2158,6 +2158,20 @@ def _build_notebook():
         print(f"[Setup] Saved subset: {len(val_ann_subset['images'])} imgs, "
               f"{len(val_ann_subset['annotations'])} anns")
     VAL_ANN_SUBSET = _val_ann_subset_path
+    # ── Validate the subset annotation JSON ────────────────────────────────────
+    # If this has 0 annotations, AP will always be 0 regardless of the model.
+    with open(VAL_ANN_SUBSET) as f:
+        _val_sub = json.load(f)
+    _n_imgs = len(_val_sub.get("images", []))
+    _n_anns = len(_val_sub.get("annotations", []))
+    _n_cats = len(_val_sub.get("categories", []))
+    print(f"[Setup] Val subset: {_n_imgs} imgs, {_n_anns} anns, {_n_cats} cats")
+    if _n_anns == 0:
+        raise RuntimeError(
+            f"[FATAL] Val subset annotation JSON has 0 annotations!\n"
+            f"  File: {VAL_ANN_SUBSET}\n"
+            f"  This means AP will always be 0. Check that val_records has images with annotations."
+        )
     print(f"[Setup] Using eval annotations: {VAL_ANN_SUBSET}")
     print("[Setup] computing repeat factors ...")
     repeat_factors = compute_repeat_factors(train_records, cfg.NUM_CLASSES, threshold=0.001)
