@@ -50,6 +50,11 @@ def _build_notebook():
     All improvements can be individually toggled via ``Config`` flags.
     The code targets **NVIDIA RTX 3090 (24 GB VRAM)** on vast.ai but runs
     on any CUDA or CPU PyTorch backend.
+
+    **Fast-compare mode (default):** 7.5k train / 1.5k val subset.
+    Full pipeline (baseline → BSGAL-orig → cRT → LWS → BSGAL+CB → τ-norm)
+    runs in **~8 hours (~$8)**.  Set ``TRAIN_SUBSET_SIZE = None`` for full
+    LVIS (~6 days).
     """)
     )
 
@@ -61,119 +66,22 @@ def _build_notebook():
 
     nb.cells.append(
         C(r"""
-    # Runtime defaults to Colab. If not in Colab, it falls back to local.
-    import os, sys, zipfile
+    # Environment Setup — vast.ai / local runtime
+    import os, sys, subprocess
     from pathlib import Path
 
-    IS_COLAB = "google.colab" in sys.modules
-    RUNTIME = "colab" if IS_COLAB else "local"
-    print(f"[Runtime] {RUNTIME}")
-
-    # ── Colab: mount Google Drive + unzip dataset archives ──────────────────────
-    if RUNTIME == "colab":
-        from google.colab import drive
-
-        if not Path("/content/drive/MyDrive").exists():
-            drive.mount("/content/drive")
-        else:
-            print("[OK] Drive already mounted.")
-
-        # Keep the same project layout as in Drive.
-        # You can override this with:
-        #   os.environ["BSGAL_COLAB_DRIVE_BASE"] = "/content/drive/MyDrive/<your-folder>"
-        drive_base = Path(
-            os.environ.get("BSGAL_COLAB_DRIVE_BASE", "/content/drive/MyDrive/BSGAL-KELOMPOK-4")
-        ).expanduser()
-        if not drive_base.exists():
-            raise FileNotFoundError(
-                f"[Colab] Project folder not found: {drive_base}\n"
-                "Set BSGAL_COLAB_DRIVE_BASE to your Drive project path."
-            )
-
-        os.environ["BSGAL_BASE_DIR"] = str(drive_base)
-        print(f"[Colab] BSGAL_BASE_DIR={drive_base}")
-
-        def _pick_extract_root(zip_path: Path, base_dir: Path) -> Path:
-            # Guess extraction root from zip internal paths.
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                names = [n for n in zf.namelist() if n and not n.endswith("/")][:200]
-
-            if any(n.startswith("datasets/") for n in names):
-                return base_dir
-            if any(n.startswith(("lvis/", "instance/", "metadata/")) for n in names):
-                return base_dir / "datasets"
-            if any(n.startswith(("train2017/", "val2017/")) for n in names):
-                return base_dir / "datasets" / "lvis"
-            if any(n.endswith(("lvis_v1_train.json", "lvis_v1_val.json")) for n in names):
-                return base_dir / "datasets" / "lvis"
-            return base_dir / "datasets"
-
-        def ensure_colab_dataset_layout(base_dir: Path):
-            # Extract dataset zips (5 archives) until the expected layout exists.
-            required = [
-                base_dir / "datasets" / "lvis" / "train2017",
-                base_dir / "datasets" / "lvis" / "val2017",
-                base_dir / "datasets" / "lvis" / "lvis_v1_train.json",
-                base_dir / "datasets" / "lvis" / "lvis_v1_val.json",
-                base_dir / "datasets" / "instance" / "output" / "LVIS_instance_pools.json",
-                base_dir / "datasets" / "metadata" / "lvis_v1_train_cat_info.json",
-                base_dir / "datasets" / "metadata" / "area_mean_std2.json",
-            ]
-
-            missing = [p for p in required if not p.exists()]
-            if not missing:
-                print("[Colab] Dataset layout already ready - skipping unzip.")
-                return
-
-            zip_candidates = sorted(set((base_dir / "datasets").rglob("*.zip")) | set(base_dir.glob("*.zip")))
-            if not zip_candidates:
-                raise FileNotFoundError(
-                    "[Colab] Missing dataset files and no ZIP archives found.\n"
-                    f"Expected ZIPs inside: {base_dir / 'datasets'}"
-                )
-
-            print(f"[Colab] Found {len(zip_candidates)} zip file(s). Extracting...")
-            for zp in zip_candidates:
-                target = _pick_extract_root(zp, base_dir)
-                target.mkdir(parents=True, exist_ok=True)
-                print(f"  - unzip {zp.name} -> {target}")
-                with zipfile.ZipFile(zp, "r") as zf:
-                    zf.extractall(target)
-
-            missing = [p for p in required if not p.exists()]
-            if missing:
-                missing_txt = "\n".join(f"  - {p}" for p in missing)
-                raise FileNotFoundError(
-                    "[Colab] Unzip finished but some required paths are still missing:\n"
-                    f"{missing_txt}"
-                )
-            print("[Colab] Dataset layout ready.")
-
-        ensure_colab_dataset_layout(drive_base)
-
-    # ── GPU setup: CUDA (NVIDIA) or ROCm (AMD) ────────────────────────────────
-    if RUNTIME == "local":
-        # NVIDIA GPU (e.g. RTX 3090 on vast.ai) - no special env vars needed.
-        # For AMD ROCm GPUs, uncomment:
-        #   os.environ.setdefault("ROCR_VISIBLE_DEVICES", "1")
-        #   os.environ.setdefault("HSA_OVERRIDE_GFX_VERSION", "10.3.0")
-        pass
-
-    # ── Install dependencies ────────────────────────────────────────────────────
-    import subprocess
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-q",
          "lvis", "pycocotools", "opencv-python-headless", "tqdm", "tensorboard"],
         check=False,
     )
 
-    # ── Quick PyTorch version check ─────────────────────────────────────────────
     import torch, torchvision
-    torch.backends.cudnn.enabled = True   # Enable cuDNN for NVIDIA GPUs (was False for ROCm)
+    torch.backends.cudnn.enabled = True
     print(f"Python:      {sys.version.split()[0]}")
     print(f"PyTorch:     {torch.__version__}")
     print(f"TorchVision: {torchvision.__version__}")
-    print(f"CUDA/ROCm:   {torch.cuda.is_available()}")
+    print(f"CUDA:        {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         p = torch.cuda.get_device_properties(0)
         print(f"GPU:         {p.name}  ({p.total_memory / 1e9:.1f} GB)")
@@ -236,15 +144,27 @@ def _build_notebook():
     ``[CB]`` are classifier-balancing improvements.  ``[W3]`` marks additions
     for Week 3 objectives (advanced backbone, dropout, TensorBoard, F1).
 
+    **Fast-compare defaults** (7.5k train / 1.5k val subset, ~8 h, ~$8):
+
+    | Schedule | Value |
+    |----------|-------|
+    | ``TRAIN_SUBSET_SIZE`` | 7 500 |
+    | ``VAL_SUBSET_SIZE`` | 1 500 |
+    | ``BASELINE_EPOCHS`` | 6 |
+    | ``BSGAL_EPOCHS`` | 3 |
+    | ``CRT_EPOCHS`` | 2 |
+    | ``LWS_EPOCHS`` | 1 |
+    | ``ACTIVE_TEST_BATCHSIZE`` | 2 |
+
     ### Classifier-Balancing Flags  *[CB]*
 
     | Flag | Default | Purpose |
     |------|---------|---------|
-    | ``USE_CRT`` | False | Classifier Re-Training (decoupled training) |
-    | ``USE_TAU_NORM`` | False | τ-normalization post-hoc weight rescaling |
-    | ``USE_LWS`` | False | Learnable per-class Weight Scaling |
-    | ``USE_CLASS_AWARE`` | False | Rarity-weighted per-class gradient similarity |
-    | ``FREEZE_BACKBONE_BSGAL`` | False | Freeze backbone during BSGAL phase |
+    | ``USE_CRT`` | True | Classifier Re-Training (decoupled training) |
+    | ``USE_TAU_NORM`` | True | τ-normalization post-hoc weight rescaling |
+    | ``USE_LWS`` | True | Learnable per-class Weight Scaling |
+    | ``USE_CLASS_AWARE`` | True | Rarity-weighted per-class gradient similarity |
+    | ``FREEZE_BACKBONE_BSGAL`` | True | Freeze backbone during BSGAL phase |
     | ``TAU_NORM_P`` | 1.0 | τ-norm power (tuned on validation set) |
     | ``CLASS_AWARE_WEIGHT`` | 2.0 | Extra weight multiplier for rare classes |
 
@@ -266,73 +186,53 @@ def _build_notebook():
         Central configuration - all knobs are here.
         Paths are auto-discovered; set ``BSGAL_BASE_DIR`` as an env-var override.
 
-        Target: RTX 3090 (24 GB VRAM) on vast.ai.
-        TINY mode produces non-zero metrics in ~1-2 hours.
-        Full mode (TINY=False) on 5 000 images takes ~6-10 hours on RTX 3090.
+        **Fast-compare mode (default):** 7.5k train subset, ~8 hours, ~$8.
+        Compares BSGAL vs BSGAL+CB with meaningful LVIS AP.
+        Set ``TRAIN_SUBSET_SIZE = None`` for full-dataset run (~6 days).
         """
         # ── Path Discovery ──────────────────────────────────────────────────────
         @staticmethod
         def _discover_base_dir() -> str:
             env_base = os.environ.get("BSGAL_BASE_DIR")
             if env_base:
-                p = Path(env_base).expanduser().resolve()
-                if (p / "datasets").exists():
-                    return str(p)
-
-            cwd = Path.cwd().resolve()
-            candidates = [
-                cwd,
-                cwd.parent,
-                Path("/workspace/BSGAL-KELOMPOK-4"),         # vast.ai default
-                Path("/workspace"),                            # vast.ai alt
-                Path("/content/drive/MyDrive/BSGAL-KELOMPOK-4"),
-                Path("/content/BSGAL-KELOMPOK-4"),
-                Path("/content/drive/MyDrive/BSGAL"),
-                Path("/home/fzhnf/Public/study-repos/DiverGen/BSGAL-KELOMPOK-4"),
-            ]
-            for p in candidates:
-                if (p / "datasets" / "metadata" / "lvis_v1_train_cat_info.json").exists():
-                    return str(p)
-                if (p / "datasets").exists():
-                    return str(p)
-            return str(cwd)
+                return str(Path(env_base).expanduser().resolve())
+            return str(Path.cwd().resolve())
 
         BASE_DIR: str = field(default_factory=_discover_base_dir)
 
-        # ── Scale & Schedule (tuned for RTX 3090, 24 GB VRAM) ────────────────
-        BASELINE_EPOCHS: int = 6          # Epochs for joint training
-        BSGAL_EPOCHS: int = 4             # Epochs for BSGAL active-learning phase
-        CRT_EPOCHS: int = 5               # [CB] Epochs for classifier re-training
-        LWS_EPOCHS: int = 3               # [CB] Epochs for LWS fine-tuning
+        # ── Scale & Schedule (fast-compare: 7.5k subset, ~8 hours) ───────
+        BASELINE_EPOCHS: int = 6
+        BSGAL_EPOCHS: int = 3
+        CRT_EPOCHS: int = 2
+        LWS_EPOCHS: int = 1
         BASELINE_ITERS: Optional[int] = None
         BSGAL_ITERS: Optional[int] = None
-        TRAIN_SUBSET_SIZE: Optional[int] = 5000   # Enough for head+tail coverage
-        VAL_SUBSET_SIZE: Optional[int] = 1000     # Stable eval with diverse categories
-        IMS_PER_BATCH: int = 4                    # 4 fits comfortably in 24 GB at 640px
-        ACTIVE_TEST_BATCHSIZE: int = 4
+        TRAIN_SUBSET_SIZE: Optional[int] = 7500    # 7.5% of LVIS train — enough rare classes
+        VAL_SUBSET_SIZE: Optional[int] = 1500       # stable AP estimate
+        IMS_PER_BATCH: int = 4
+        ACTIVE_TEST_BATCHSIZE: int = 2              # smaller = less triplet overhead
         IMAGE_SIZE: int = 640
-        NUM_WORKERS: int = 4                      # Parallel data loading on vast.ai
+        NUM_WORKERS: int = 4
 
-        # ── Logging & Checkpoint ────────────────────────────────────────────────
+        # ── Logging & Checkpoint ────────────────────────────────────────────
         LOG_EVERY: int = 50
         EVAL_EVERY_EPOCH: int = 1
         CKPT_EVERY_EPOCH: int = 1
 
-        # ── Optimizer ───────────────────────────────────────────────────────────
         LR: float = 1e-4
         WEIGHT_DECAY: float = 1e-4
-        WARMUP_ITERS: int = 500
-        BSGAL_WARMUP_ITERS: int = 200
-        CRT_LR: float = 1e-3        # [CB] Higher LR for classifier-only training
+        WARMUP_ITERS: int = 200
+        BSGAL_WARMUP_ITERS: int = 100
+        CRT_LR: float = 1e-3
         CLIP_GRAD_NORM: float = 1.0
         USE_AMP: bool = True
 
-        # ── Federated Loss ──────────────────────────────────────────────────────
+        # ── Federated Loss ─────────────────────────────────────────────────
         USE_FED_LOSS: bool = True
         FED_LOSS_NUM_CAT: int = 50
         FED_LOSS_FREQ_WEIGHT: float = 0.5
 
-        # ── Copy-Paste Augmentation ─────────────────────────────────────────────
+        # ── Copy-Paste Augmentation ────────────────────────────────────────
         INST_POOL_MAX_SAMPLES: int = 20
         MASK_THRESHOLD: int = 127
         BBOX_OCCLUDED_THR: int = 10
@@ -341,38 +241,30 @@ def _build_notebook():
         SCALE_MAX_FRAC: float = 0.5
         SHAPE_JITTER: float = 0.2
 
-        # ── BSGAL Active Learning ───────────────────────────────────────────────
+        # ── BSGAL Active Learning ──────────────────────────────────────────
         BSGAL_ENABLED: bool = True
         ACTIVE_GRAD_MOMENTUM: float = 0.1
         ACTIVE_DECISION_BIAS: float = -0.05
 
-        # ── [CB] Classifier-Balancing Controls ──────────────────────────────────
-        USE_CRT: bool = False
-        USE_TAU_NORM: bool = False
+        # ── Classifier-Balancing Controls ──────────────────────────────────
+        USE_CRT: bool = True
+        USE_TAU_NORM: bool = True
         TAU_NORM_P: float = 1.0
-        USE_LWS: bool = False
-        USE_CLASS_AWARE: bool = False
+        USE_LWS: bool = True
+        USE_CLASS_AWARE: bool = True
         CLASS_AWARE_WEIGHT: float = 2.0
-        FREEZE_BACKBONE_BSGAL: bool = False
+        FREEZE_BACKBONE_BSGAL: bool = True
 
-        # ── [W3] Week 3 Objectives ─────────────────────────────────────────────
+        # ── Model ──────────────────────────────────────────────────────────
         BACKBONE: str = "resnet50"
-        # ResNet-101 = deeper residual net (44M params, ~300 MB extra VRAM).
-        # Swin-T    = transformer-based hierarchy (28M params, needs separate FPN adapter).
-        # Only "resnet50" and "resnet101" are supported in this notebook;
-        # see torchvision.models.detection.backbone_utils for custom backbones.
         DROPOUT_P: float = 0.2
-        # Dropout applied BEFORE the final classification linear layer.
-        # Reduces overfitting to head classes by randomly zeroing 20% of RoI features.
         USE_TENSORBOARD: bool = True
         TENSORBOARD_LOG_DIR: Optional[str] = None
-        # When ``None``, auto-creates ``runs/bsgal_YYYY-MM-DD_HH-MM-SS``.
 
-        # ── Misc ────────────────────────────────────────────────────────────────
-        NUM_CLASSES: int = 1203           # LVIS v1 (no-background count)
+        # ── Misc ───────────────────────────────────────────────────────────
+        NUM_CLASSES: int = 1203
         SEED: int = 42
-        SKIP_IF_EXISTS: bool = False       # Always retrain unless explicitly set True
-        TINY: bool = True                 # Smoke-test mode (mini dataset, 1-2 epochs)
+        SKIP_IF_EXISTS: bool = False
 
         # ── Derived Paths ───────────────────────────────────────────────────────
         @property
@@ -413,48 +305,11 @@ def _build_notebook():
 
     cfg = Config()
 
-    # ── Tiny Mode Override ──────────────────────────────────────────────────────
-    # TINY=True  → ~1-2 hour pipeline on RTX 3090; produces non-zero metrics
-    # TINY=False → ~6-10 hour pipeline on RTX 3090; use for final results
-    if cfg.TINY:
-        cfg.BASELINE_EPOCHS = 6          # enough iters for RPN + heads to converge
-        cfg.BSGAL_EPOCHS    = 3          # BSGAL is expensive but needs more iters
-        cfg.CRT_EPOCHS      = 4          # classifier re-training benefits from more epochs
-        cfg.LWS_EPOCHS      = 3
-        cfg.TRAIN_SUBSET_SIZE = 3000     # 3000 imgs for meaningful head+tail coverage
-        cfg.VAL_SUBSET_SIZE   = 500      # 500 imgs for stable eval across categories
-        cfg.IMS_PER_BATCH     = 4        # 4 fits in 24 GB at 640px
-        cfg.ACTIVE_TEST_BATCHSIZE = 4
-        cfg.WARMUP_ITERS = 300           # shorter warmup for subset training
-        cfg.LOG_EVERY = 25               # reduce log noise
-        # ── Fast CB flags for TINY (skip expensive stages to get AP fast) ────
-        cfg.USE_CRT = True
-        cfg.USE_TAU_NORM = True
-        cfg.USE_LWS = True
-        cfg.USE_CLASS_AWARE = True
-        cfg.FREEZE_BACKBONE_BSGAL = True
-
-        # ── Clean old checkpoints from previous TINY runs (stale = zero metrics) ──
-        import shutil
-        old_ckpt_dirs = [
-            cfg.BASELINE_CKPT_DIR, cfg.BSGAL_CKPT_DIR,
-            cfg.CRT_CKPT_DIR, cfg.LWS_CKPT_DIR,
-            cfg.MODELS_DIR + "/bsgal-plain",
-        ]
-        for d in old_ckpt_dirs:
-            if os.path.isdir(d):
-                ckpts = [f for f in os.listdir(d) if f.endswith(('.pth', '.json'))]
-                for fn in ckpts:
-                    fp = os.path.join(d, fn)
-                    os.remove(fp)
-                    print(f"[Clean] Removed {fp}")
-
     for d in [cfg.BASELINE_CKPT_DIR, cfg.BSGAL_CKPT_DIR,
               cfg.CRT_CKPT_DIR, cfg.LWS_CKPT_DIR]:
         Path(d).mkdir(parents=True, exist_ok=True)
 
     print(f"BASE_DIR: {cfg.BASE_DIR}")
-    print(f"TINY:     {cfg.TINY}")
     print(f"DEVICE:   {DEVICE}")
     print(f"CRT={cfg.USE_CRT} | TAU={cfg.USE_TAU_NORM} | LWS={cfg.USE_LWS} "
           f"| CA={cfg.USE_CLASS_AWARE} | FB={cfg.FREEZE_BACKBONE_BSGAL}")
@@ -1451,8 +1306,7 @@ def _build_notebook():
         each trial is just one eval pass.
         """
         if p_values is None:
-            p_values = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
-
+            p_values = [0.0, 0.5, 1.0, 1.5, 2.0]
         best_p, best_apr, best_metrics = 0.0, 0.0, {}
         for p in p_values:
             model = model_builder_fn()

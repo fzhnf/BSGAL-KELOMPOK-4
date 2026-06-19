@@ -44,7 +44,7 @@ def _build_notebook():
     LVIS AP metrics.  Not for final results — use ``bsgal.ipynb`` for that.
 
     Target: **NVIDIA RTX 3090 (24 GB VRAM)** on vast.ai.
-    Expected runtime: **~20-30 minutes** (TINY mode).
+    Expected runtime: **~5-10 minutes** — just proves the script can run.
     """)
     )
 
@@ -57,28 +57,10 @@ def _build_notebook():
 
     nb.cells.append(
         C(r"""
-    import os, sys, zipfile
+    # Environment Setup — vast.ai / local runtime
+    import os, sys, subprocess
     from pathlib import Path
 
-    IS_COLAB = "google.colab" in sys.modules
-    RUNTIME = "colab" if IS_COLAB else "local"
-    print(f"[Runtime] {RUNTIME}")
-
-    if RUNTIME == "colab":
-        from google.colab import drive
-        if not Path("/content/drive/MyDrive").exists():
-            drive.mount("/content/drive")
-        else:
-            print("[OK] Drive already mounted.")
-        drive_base = Path(
-            os.environ.get("BSGAL_COLAB_DRIVE_BASE", "/content/drive/MyDrive/BSGAL-KELOMPOK-4")
-        ).expanduser()
-        if not drive_base.exists():
-            raise FileNotFoundError(f"[Colab] Project folder not found: {drive_base}")
-        os.environ["BSGAL_BASE_DIR"] = str(drive_base)
-
-    # ── GPU setup ─────────────────────────────────────────────────────────────
-    import subprocess
     subprocess.run(
         [sys.executable, "-m", "pip", "-q", "install",
          "lvis", "pycocotools", "opencv-python-headless", "tqdm"],
@@ -154,30 +136,15 @@ def _build_notebook():
         def _discover_base_dir() -> str:
             env_base = os.environ.get("BSGAL_BASE_DIR")
             if env_base:
-                p = Path(env_base).expanduser().resolve()
-                if (p / "datasets").exists():
-                    return str(p)
-            cwd = Path.cwd().resolve()
-            candidates = [
-                cwd, cwd.parent,
-                Path("/workspace/BSGAL-KELOMPOK-4"),
-                Path("/workspace"),
-                Path("/content/drive/MyDrive/BSGAL-KELOMPOK-4"),
-                Path("/content/BSGAL-KELOMPOK-4"),
-            ]
-            for p in candidates:
-                if (p / "datasets" / "metadata" / "lvis_v1_train_cat_info.json").exists():
-                    return str(p)
-                if (p / "datasets").exists():
-                    return str(p)
-            return str(cwd)
+                return str(Path(env_base).expanduser().resolve())
+            return str(Path.cwd().resolve())
 
         BASE_DIR: str = field(default_factory=_discover_base_dir)
 
-        # ── Smoketest schedule ───────────────────────────────────────────────
-        BASELINE_EPOCHS: int = 3          # 3 epochs for convergence with 1203 classes
-        TRAIN_SUBSET_SIZE: Optional[int] = 1000  # 1000 imgs for head+tail class coverage
-        VAL_SUBSET_SIZE: Optional[int] = 200
+        # ── Smoketest schedule (fast — prove script can run) ────────────────
+        BASELINE_EPOCHS: int = 1
+        TRAIN_SUBSET_SIZE: Optional[int] = 500
+        VAL_SUBSET_SIZE: Optional[int] = 100
         IMS_PER_BATCH: int = 4
         IMAGE_SIZE: int = 640
         NUM_WORKERS: int = 4
@@ -185,7 +152,7 @@ def _build_notebook():
         # ── Optimizer ────────────────────────────────────────────────────────
         LR: float = 1e-4
         WEIGHT_DECAY: float = 1e-4
-        WARMUP_ITERS: int = 100
+        WARMUP_ITERS: int = 50
         CLIP_GRAD_NORM: float = 1.0
         USE_AMP: bool = True
 
@@ -872,30 +839,6 @@ def _build_notebook():
     eval_loader   = make_eval_loader(val_dataset)
     iters_per_epoch = max(1, len(train_records) // cfg.IMS_PER_BATCH)
     print(f"[Setup] iters_per_epoch: {iters_per_epoch}")
-
-
-    # ── Pre-training sanity eval ──────────────────────────────────────────────
-    # Evaluate the ImageNet-pretrained model BEFORE any LVIS training.
-    # If this produces AP > 0, the eval pipeline is correct.
-    print("\n[Sanity] Pre-training eval (ImageNet weights, no LVIS training) ...")
-    pretrained_model = build_model(
-        num_classes_with_bg=cfg.NUM_CLASSES + 1,
-        freq_weight=cat_info["cat_freq_weight"],
-        fed_loss_num_cat=cfg.FED_LOSS_NUM_CAT,
-        use_fed_loss=cfg.USE_FED_LOSS,
-        image_size=cfg.IMAGE_SIZE,
-    ).to(DEVICE)
-    metrics_pre = evaluate_on_lvis(pretrained_model, eval_loader, VAL_ANN_SUBSET, DEVICE)
-    del pretrained_model; torch.cuda.empty_cache()
-
-    print(f"[Sanity] Pre-training metrics: AP={metrics_pre.get('AP', 0):.4f}  "
-          f"AP50={metrics_pre.get('AP50', 0):.4f}")
-    if metrics_pre.get("AP", 0) > 0:
-        print("[Sanity] ✅ Eval pipeline confirmed working (pre-training AP > 0)")
-    else:
-        print("[Sanity] ⚠ Pre-training AP = 0 (expected for untrained on 1203 classes)")
-        print("[Sanity]   Training should fix this. If post-training AP is also 0,")
-        print("[Sanity]   check that the val subset annotation JSON matches the eval subset.")
 
 
     # ── Baseline Training ─────────────────────────────────────────────────────
